@@ -61,7 +61,7 @@ const PLATFORM_OPTIONS = [
 const SETUP_TEMPLATE = {
   requestedBy: "Jeffrey Fass (ACC, Inc. / AutoDirect)",
   objective:
-    "Dealership geo-conquest + home-fencing campaigns focused on real-time impressions/clicks with 14-30 day retargeting.",
+    "Dealership geo-conquest + home-fencing campaigns focused on real-time impressions/clicks with 14-30 day retargeting in Wichita Falls.",
   defaultMessage: "NO GAMES - Just Honest Pricing and Extraordinary Service",
   fenceRecommendations: {
     preferredFeetRange: [300, 500],
@@ -73,25 +73,12 @@ const SETUP_TEMPLATE = {
   },
   locations: [
     {
-      id: "nissan-city-red-bank",
-      dealershipName: "Nissan City Red Bank NJ",
-      address: "120 Newman Springs Rd, Red Bank, NJ 07701",
-      coordinates: { lat: 40.355, lng: -74.075 },
-      requiredCompetitorCount: 4,
-      competitorSuggestions: [
-        { name: "Pine Belt Nissan of Toms River", address: "TBD with Jeffrey" },
-        { name: "Sansone 66 Nissan", address: "TBD with Jeffrey" },
-        { name: "Circle Hyundai", address: "TBD with Jeffrey" },
-        { name: "Schwartz Mazda", address: "TBD with Jeffrey" }
-      ]
-    },
-    {
-      id: "jeep-city-greenwich",
-      dealershipName: "Jeep City / Chrysler Dodge Jeep RAM City Greenwich CT",
-      address: "631 W. Putnam Ave, Greenwich, CT 06830",
-      coordinates: { lat: 41.017, lng: -73.637 },
+      id: "nissan-wichita-falls",
+      dealershipName: "Nissan of Wichita Falls",
+      address: "4000 Kell West Blvd, Wichita Falls, TX 76309",
+      coordinates: { lat: 33.8806084, lng: -98.5460791 },
       requiredCompetitorCount: 1,
-      competitorSuggestions: [{ name: "Competitor TBD", address: "TBD with Jeffrey" }]
+      competitorSuggestions: [{ name: "Patterson Honda", address: "319 Central East Fwy, Wichita Falls, TX 76302" }]
     }
   ],
   trackingGoals: ["impressions", "clicks", "ctr", "store visits/calls/directions where available"]
@@ -275,7 +262,14 @@ const GOOGLE_TOKEN_URI_FALLBACK = "https://oauth2.googleapis.com/token";
 const GOOGLE_API_VERSION_FALLBACK = "v22";
 const NISSAN_WICHITA_FALLS_CUSTOMER_ID = "7891399350";
 const NISSAN_WICHITA_FALLS_ACCOUNT_NAME = "Nissan Wichita Falls";
-const NISSAN_WICHITA_FALLS_ADDRESS = "Nissan Wichita Falls (address to be confirmed)";
+const NISSAN_WICHITA_FALLS_ADDRESS = "4000 Kell West Blvd, Wichita Falls, TX 76309";
+const NISSAN_WICHITA_FALLS_LAT = 33.8806084;
+const NISSAN_WICHITA_FALLS_LNG = -98.5460791;
+const WICHITA_DEFAULT_COMPETITOR_NAME = "Patterson Honda";
+const WICHITA_DEFAULT_COMPETITOR_ADDRESS = "319 Central East Fwy, Wichita Falls, TX 76302";
+const WICHITA_DEFAULT_COMPETITOR_LAT = 33.8884365;
+const WICHITA_DEFAULT_COMPETITOR_LNG = -98.4861729;
+const WICHITA_DEFAULT_COMPETITOR_RADIUS_MILES = 1;
 const GOOGLE_ADS_AUTO_SYNC_DEFAULT_INTERVAL_SEC = 300;
 const AUTO_SYNC_SUPPORTED_TRIGGERS = new Set(["startup", "interval", "manual", "activation"]);
 
@@ -455,6 +449,33 @@ function getGoogleAdsAutoSyncStatus() {
   };
 }
 
+function parseBoolean(value, fallback = false) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  if (!normalized) {
+    return fallback;
+  }
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "n", "off"].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+}
+
+function toMicroDegrees(value) {
+  return Math.round(Number(value) * 1_000_000);
+}
+
+function campaignResourceName(customerId, campaignId) {
+  return `customers/${digitsOnly(customerId)}/campaigns/${digitsOnly(campaignId)}`;
+}
+
 async function fetchGoogleAdsAccessToken() {
   if (googleAdsTokenCache.accessToken && Date.now() < googleAdsTokenCache.expiresAt) {
     return googleAdsTokenCache.accessToken;
@@ -499,51 +520,70 @@ function parseGoogleAdsApiError(payload, statusCode) {
       return `${first.error.message} (HTTP ${statusCode})`;
     }
   }
+  const firstDetailedError = payload?.error?.details?.[0]?.errors?.[0];
+  if (firstDetailedError?.message) {
+    const codeContainer = firstDetailedError.errorCode || {};
+    const codeKey = Object.keys(codeContainer)[0];
+    const codeValue = codeKey ? codeContainer[codeKey] : "";
+    const codeSuffix = codeValue ? ` [${codeValue}]` : "";
+    return `${firstDetailedError.message}${codeSuffix} (HTTP ${statusCode})`;
+  }
   if (payload?.error?.message) {
     return `${payload.error.message} (HTTP ${statusCode})`;
   }
   return `Google Ads API request failed (${statusCode}).`;
 }
 
-async function googleAdsSearchStream(customerId, query) {
-  const customerIdDigits = digitsOnly(customerId);
-  if (!customerIdDigits) {
-    throw new Error("A Google Ads customer ID is required.");
-  }
-
+async function getGoogleAdsRequestHeaders() {
   const developerToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
   if (!developerToken) {
     throw new Error("Missing GOOGLE_ADS_DEVELOPER_TOKEN.");
   }
 
   const accessToken = await fetchGoogleAdsAccessToken();
-  const apiVersion = process.env.GOOGLE_ADS_API_VERSION || GOOGLE_API_VERSION_FALLBACK;
   const loginCustomerId = digitsOnly(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || "");
 
-  const requestHeaders = {
+  const headers = {
     Authorization: `Bearer ${accessToken}`,
     "Content-Type": "application/json",
     "developer-token": developerToken
   };
 
   if (loginCustomerId) {
-    requestHeaders["login-customer-id"] = loginCustomerId;
+    headers["login-customer-id"] = loginCustomerId;
   }
 
+  return headers;
+}
+
+async function googleAdsApiPost(customerId, pathSuffix, payload) {
+  const customerIdDigits = digitsOnly(customerId);
+  if (!customerIdDigits) {
+    throw new Error("A Google Ads customer ID is required.");
+  }
+
+  const apiVersion = process.env.GOOGLE_ADS_API_VERSION || GOOGLE_API_VERSION_FALLBACK;
+  const headers = await getGoogleAdsRequestHeaders();
+
   const response = await fetch(
-    `https://googleads.googleapis.com/${apiVersion}/customers/${customerIdDigits}/googleAds:searchStream`,
+    `https://googleads.googleapis.com/${apiVersion}/customers/${customerIdDigits}/${pathSuffix}`,
     {
       method: "POST",
-      headers: requestHeaders,
-      body: JSON.stringify({ query })
+      headers,
+      body: JSON.stringify(payload)
     }
   );
 
-  const payload = await response.json().catch(() => ({}));
+  const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(parseGoogleAdsApiError(payload, response.status));
+    throw new Error(parseGoogleAdsApiError(body, response.status));
   }
 
+  return body;
+}
+
+async function googleAdsSearchStream(customerId, query) {
+  const payload = await googleAdsApiPost(customerId, "googleAds:searchStream", { query });
   if (Array.isArray(payload)) {
     return payload;
   }
@@ -599,6 +639,175 @@ async function listGoogleAdsCampaignRows(customerId) {
   }
 
   return rows.filter((row) => row.id);
+}
+
+function normalizeProximityCriterionRow(row) {
+  const criterion = row.campaignCriterion || row.campaign_criterion || {};
+  const proximity = criterion.proximity || {};
+  const address = proximity.address || {};
+  const geoPoint = proximity.geoPoint || proximity.geo_point || {};
+
+  const latRaw = firstDefined(geoPoint, ["latitudeInMicroDegrees", "latitude_in_micro_degrees"], 0);
+  const lngRaw = firstDefined(geoPoint, ["longitudeInMicroDegrees", "longitude_in_micro_degrees"], 0);
+  const latMicro = Number.isFinite(Number(latRaw)) ? Number(latRaw) : 0;
+  const lngMicro = Number.isFinite(Number(lngRaw)) ? Number(lngRaw) : 0;
+
+  return {
+    resourceName: String(firstDefined(criterion, ["resourceName", "resource_name"], "")),
+    criterionId: String(firstDefined(criterion, ["criterionId", "criterion_id"], "")),
+    radius: asPositiveNumber(proximity.radius, 0),
+    radiusUnits: String(firstDefined(proximity, ["radiusUnits", "radius_units"], "UNKNOWN")),
+    address: {
+      streetAddress: String(firstDefined(address, ["streetAddress", "street_address"], "")),
+      cityName: String(firstDefined(address, ["cityName", "city_name"], "")),
+      provinceCode: String(firstDefined(address, ["provinceCode", "province_code"], "")),
+      postalCode: String(firstDefined(address, ["postalCode", "postal_code"], "")),
+      countryCode: String(firstDefined(address, ["countryCode", "country_code"], "US"))
+    },
+    geoPoint: {
+      latitude: latMicro ? latMicro / 1_000_000 : 0,
+      longitude: lngMicro ? lngMicro / 1_000_000 : 0
+    }
+  };
+}
+
+async function listGoogleCampaignProximityCriteria(customerId, campaignId) {
+  const googleCampaignId = digitsOnly(campaignId);
+  if (!googleCampaignId) {
+    throw new Error("A Google campaign ID is required.");
+  }
+
+  const query = `
+    SELECT
+      campaign_criterion.resource_name,
+      campaign_criterion.criterion_id,
+      campaign_criterion.proximity.radius,
+      campaign_criterion.proximity.radius_units,
+      campaign_criterion.proximity.address.street_address,
+      campaign_criterion.proximity.address.city_name,
+      campaign_criterion.proximity.address.province_code,
+      campaign_criterion.proximity.address.postal_code,
+      campaign_criterion.proximity.address.country_code,
+      campaign_criterion.proximity.geo_point.latitude_in_micro_degrees,
+      campaign_criterion.proximity.geo_point.longitude_in_micro_degrees
+    FROM campaign_criterion
+    WHERE campaign.id = ${googleCampaignId}
+      AND campaign_criterion.type = PROXIMITY
+  `;
+
+  const chunks = await googleAdsSearchStream(customerId, query);
+  const rows = [];
+  for (const chunk of chunks) {
+    if (Array.isArray(chunk.results)) {
+      for (const row of chunk.results) {
+        rows.push(normalizeProximityCriterionRow(row));
+      }
+    }
+  }
+  return rows.filter((row) => row.resourceName);
+}
+
+async function mutateGoogleCampaignCriteria(customerId, operations, options = {}) {
+  if (!Array.isArray(operations) || operations.length === 0) {
+    return { results: [] };
+  }
+
+  return googleAdsApiPost(customerId, "campaignCriteria:mutate", {
+    operations,
+    partialFailure: parseBoolean(options.partialFailure, false),
+    validateOnly: parseBoolean(options.validateOnly, false)
+  });
+}
+
+async function declareCampaignNonPoliticalEUAds(customerId, campaignId, options = {}) {
+  const payload = {
+    operations: [
+      {
+        update: {
+          resourceName: campaignResourceName(customerId, campaignId),
+          containsEuPoliticalAdvertising: "DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING"
+        },
+        updateMask: "contains_eu_political_advertising"
+      }
+    ],
+    partialFailure: false,
+    validateOnly: parseBoolean(options.validateOnly, false)
+  };
+
+  return googleAdsApiPost(customerId, "campaigns:mutate", payload);
+}
+
+async function pushNissanCompetitorGeofenceToGoogle(options = {}) {
+  const customerId = digitsOnly(options.customerId || getNissanCustomerId());
+  if (!customerId) {
+    throw new Error("No Nissan customer ID configured.");
+  }
+
+  const googleCampaignId = digitsOnly(options.googleCampaignId);
+  if (!googleCampaignId) {
+    throw new Error("No Google campaign ID provided for geofence push.");
+  }
+
+  const centerLat = Number(options.centerLat ?? WICHITA_DEFAULT_COMPETITOR_LAT);
+  const centerLng = Number(options.centerLng ?? WICHITA_DEFAULT_COMPETITOR_LNG);
+  if (!Number.isFinite(centerLat) || !Number.isFinite(centerLng)) {
+    throw new Error("Valid centerLat and centerLng are required.");
+  }
+
+  const radiusMiles = Math.max(0.1, Number(options.radiusMiles ?? WICHITA_DEFAULT_COMPETITOR_RADIUS_MILES));
+  const competitorName = String(options.competitorName || WICHITA_DEFAULT_COMPETITOR_NAME);
+  const competitorAddress = String(options.competitorAddress || WICHITA_DEFAULT_COMPETITOR_ADDRESS);
+  const replaceExisting = parseBoolean(options.replaceExisting, true);
+  const validateOnly = parseBoolean(options.validateOnly, false);
+
+  const existing = await listGoogleCampaignProximityCriteria(customerId, googleCampaignId);
+  const operations = [];
+
+  if (replaceExisting) {
+    for (const criterion of existing) {
+      operations.push({ remove: criterion.resourceName });
+    }
+  }
+
+  operations.push({
+    create: {
+      campaign: campaignResourceName(customerId, googleCampaignId),
+      negative: false,
+      proximity: {
+        radius: Number(radiusMiles.toFixed(2)),
+        radiusUnits: "MILES",
+        geoPoint: {
+          latitudeInMicroDegrees: toMicroDegrees(centerLat),
+          longitudeInMicroDegrees: toMicroDegrees(centerLng)
+        },
+        address: {
+          streetAddress: competitorAddress,
+          cityName: "Wichita Falls",
+          provinceCode: "TX",
+          postalCode: "76302",
+          countryCode: "US"
+        }
+      }
+    }
+  });
+
+  const mutateResult = await mutateGoogleCampaignCriteria(customerId, operations, { validateOnly });
+  const postPush = validateOnly ? existing : await listGoogleCampaignProximityCriteria(customerId, googleCampaignId);
+
+  return {
+    customerId,
+    googleCampaignId,
+    competitorName,
+    competitorAddress,
+    radiusMiles: Number(radiusMiles.toFixed(2)),
+    centerLat,
+    centerLng,
+    validateOnly,
+    replacedTargets: replaceExisting ? existing.length : 0,
+    existingTargetsBefore: existing,
+    targetsAfter: postPush,
+    mutateResult
+  };
 }
 
 function selectNissanCampaign(rows, requestedCampaignId, campaignNameContains) {
@@ -858,6 +1067,8 @@ app.get("/", (_req, res) => {
       googleAdsNissanCampaigns: "GET /api/integrations/google-ads/nissan/campaigns",
       googleAdsNissanActivate: "POST /api/integrations/google-ads/nissan/activate",
       googleAdsNissanSyncNow: "POST /api/integrations/google-ads/nissan/sync-now",
+      googleAdsNissanDeclareCampaign: "POST /api/integrations/google-ads/nissan/declaration",
+      googleAdsNissanPushGeofence: "POST /api/integrations/google-ads/nissan/geofence/push",
       geofenceCheck: "POST /api/geofence/check"
     }
   });
@@ -986,6 +1197,191 @@ app.post("/api/integrations/google-ads/nissan/sync-now", async (req, res) => {
     const message = error instanceof Error ? error.message : "Failed to run Nissan sync.";
     const statusCode = message.toLowerCase().includes("missing") ? 400 : 500;
     res.status(statusCode).json({ ok: false, error: message });
+  }
+});
+
+app.post("/api/integrations/google-ads/nissan/declaration", async (req, res) => {
+  try {
+    const customerId = digitsOnly(req.body.customerId || getNissanCustomerId());
+    const googleCampaignId = digitsOnly(
+      req.body.googleCampaignId ||
+        campaigns.find((item) => item.integration?.source === "google_ads")?.integration?.googleCampaignId ||
+        ""
+    );
+
+    if (!customerId) {
+      res.status(400).json({ ok: false, error: "No Nissan customer ID configured." });
+      return;
+    }
+
+    if (!googleCampaignId) {
+      res.status(400).json({ ok: false, error: "No Google campaign ID provided for declaration update." });
+      return;
+    }
+
+    const validateOnly = parseBoolean(req.body.validateOnly, false);
+    const result = await declareCampaignNonPoliticalEUAds(customerId, googleCampaignId, { validateOnly });
+
+    res.json({
+      ok: true,
+      integration: "google_ads",
+      customerId,
+      googleCampaignId,
+      validateOnly,
+      declaration: "DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING",
+      result
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to update EU declaration.";
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+app.post("/api/integrations/google-ads/nissan/geofence/push", async (req, res) => {
+  try {
+    const customerId = digitsOnly(req.body.customerId || getNissanCustomerId());
+    const linkedGoogleCampaignId = campaigns.find((item) => item.integration?.source === "google_ads")?.integration
+      ?.googleCampaignId;
+    const googleCampaignId = digitsOnly(req.body.googleCampaignId || linkedGoogleCampaignId || "");
+    const competitorName = String(req.body.competitorName || WICHITA_DEFAULT_COMPETITOR_NAME);
+    const competitorAddress = String(req.body.competitorAddress || WICHITA_DEFAULT_COMPETITOR_ADDRESS);
+    const radiusMiles = Number(req.body.radiusMiles ?? WICHITA_DEFAULT_COMPETITOR_RADIUS_MILES);
+    const centerLat = Number(req.body.centerLat ?? WICHITA_DEFAULT_COMPETITOR_LAT);
+    const centerLng = Number(req.body.centerLng ?? WICHITA_DEFAULT_COMPETITOR_LNG);
+    const replaceExisting = parseBoolean(req.body.replaceExisting, true);
+    const validateOnly = parseBoolean(req.body.validateOnly, false);
+    const confirmNoEUPoliticalAds = parseBoolean(req.body.confirmNoEUPoliticalAds, false);
+
+    if (!customerId) {
+      res.status(400).json({ ok: false, error: "No Nissan customer ID configured." });
+      return;
+    }
+
+    if (!googleCampaignId) {
+      res.status(400).json({ ok: false, error: "No Google campaign ID provided. Activate Nissan data first." });
+      return;
+    }
+
+    let pushResult;
+    try {
+      pushResult = await pushNissanCompetitorGeofenceToGoogle({
+        customerId,
+        googleCampaignId,
+        competitorName,
+        competitorAddress,
+        radiusMiles,
+        centerLat,
+        centerLng,
+        replaceExisting,
+        validateOnly
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to push geofence.";
+      const needsDeclaration = message.includes("MISSING_EU_POLITICAL_ADVERTISING_SELF_DECLARATION");
+
+      if (needsDeclaration && confirmNoEUPoliticalAds) {
+        await declareCampaignNonPoliticalEUAds(customerId, googleCampaignId, { validateOnly: false });
+        pushResult = await pushNissanCompetitorGeofenceToGoogle({
+          customerId,
+          googleCampaignId,
+          competitorName,
+          competitorAddress,
+          radiusMiles,
+          centerLat,
+          centerLng,
+          replaceExisting,
+          validateOnly
+        });
+      } else {
+        const statusCode = needsDeclaration ? 409 : 500;
+        const hint = needsDeclaration
+          ? "Set confirmNoEUPoliticalAds=true in this endpoint request, or set the campaign declaration in Google Ads."
+          : null;
+        res.status(statusCode).json({ ok: false, error: message, hint });
+        return;
+      }
+    }
+
+    const liveLinkedCampaign = campaigns.find(
+      (item) =>
+        item.integration?.source === "google_ads" &&
+        digitsOnly(item.integration?.customerId) === customerId &&
+        digitsOnly(item.integration?.googleCampaignId) === googleCampaignId
+    );
+
+    if (liveLinkedCampaign && !validateOnly) {
+      const now = new Date().toISOString();
+      liveLinkedCampaign.fences = [
+        {
+          id: createId("fence"),
+          type: "home",
+          locationName: "Nissan of Wichita Falls",
+          address: NISSAN_WICHITA_FALLS_ADDRESS,
+          radiusFeet: 500,
+          dwellTimeMin: 12,
+          velocityMax: 6,
+          isEVMode: false,
+          coordinates: [{ lat: NISSAN_WICHITA_FALLS_LAT, lng: NISSAN_WICHITA_FALLS_LNG }]
+        },
+        {
+          id: createId("fence"),
+          type: "competitor",
+          locationName: competitorName,
+          address: competitorAddress,
+          radiusFeet: Math.round(pushResult.radiusMiles * 5280),
+          dwellTimeMin: 12,
+          velocityMax: 6,
+          isEVMode: false,
+          coordinates: [{ lat: centerLat, lng: centerLng }]
+        }
+      ];
+
+      liveLinkedCampaign.integration = {
+        ...liveLinkedCampaign.integration,
+        geofenceLastPushedAt: now,
+        geofenceTarget: {
+          competitorName,
+          competitorAddress,
+          radiusMiles: pushResult.radiusMiles,
+          centerLat,
+          centerLng
+        }
+      };
+
+      pushLiveEvent({
+        id: createId("event"),
+        campaignId: liveLinkedCampaign.id,
+        campaignName: liveLinkedCampaign.name,
+        timestamp: now,
+        type: "google_ads_geofence_push",
+        velocityMph: 0,
+        dwellTimeMin: 0,
+        result: `Pushed ${pushResult.radiusMiles}mi Google proximity fence for ${competitorName}.`,
+        competitorLot: competitorName,
+        deviceId: "GADS"
+      });
+    }
+
+    res.json({
+      ok: true,
+      integration: "google_ads",
+      customerId,
+      googleCampaignId,
+      competitorName,
+      competitorAddress,
+      center: {
+        lat: centerLat,
+        lng: centerLng
+      },
+      radiusMiles: pushResult.radiusMiles,
+      replaceExisting,
+      validateOnly,
+      push: pushResult,
+      dashboard: calculateDashboard()
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to push geofence to Google Ads.";
+    res.status(500).json({ ok: false, error: message });
   }
 });
 

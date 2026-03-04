@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet-draw";
-import { CheckCircle2, Crosshair, Rocket, Wrench, X } from "lucide-react";
+import { CheckCircle2, Crosshair, Link2, Rocket, Wrench, X } from "lucide-react";
+import { apiRequest } from "../lib/api";
 import { type SetupLocation, useTrueRankStore } from "../lib/store";
 
 delete (L.Icon.Default.prototype as unknown as { _getIconUrl?: unknown })._getIconUrl;
@@ -32,10 +33,13 @@ function offsetPoint(base: { lat: number; lng: number }, latOffset: number, lngO
 
 export function CampaignArchitect() {
   const setup = useTrueRankStore((s) => s.setup);
+  const campaigns = useTrueRankStore((s) => s.campaigns);
+  const apiBaseUrl = useTrueRankStore((s) => s.apiBaseUrl);
   const platformOptions = useTrueRankStore((s) => s.platformOptions);
   const loading = useTrueRankStore((s) => s.loading);
   const launchCampaign = useTrueRankStore((s) => s.launchCampaign);
   const activationChecklist = useTrueRankStore((s) => s.activationChecklist);
+  const refreshDashboard = useTrueRankStore((s) => s.refreshDashboard);
 
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<L.Map | null>(null);
@@ -49,6 +53,8 @@ export function CampaignArchitect() {
   const [isLaunching, setIsLaunching] = useState(false);
   const [drawnCoords, setDrawnCoords] = useState<Array<{ lat: number; lng: number }>>([]);
   const [launchMessage, setLaunchMessage] = useState<string>("");
+  const [isPushingGoogle, setIsPushingGoogle] = useState(false);
+  const [googlePushMessage, setGooglePushMessage] = useState("");
 
   const [campaignName, setCampaignName] = useState("Q2 Honest Pricing Conquest");
   const [dailyBudget, setDailyBudget] = useState(150);
@@ -72,6 +78,14 @@ export function CampaignArchitect() {
     }
     return setup.locations.find((location) => location.id === selectedLocationId) || setup.locations[0] || null;
   }, [setup, selectedLocationId]);
+
+  const linkedGoogleCampaign = useMemo(
+    () =>
+      campaigns.find(
+        (campaign) => campaign.integration?.source === "google_ads" && Boolean(campaign.integration?.googleCampaignId)
+      ) || null,
+    [campaigns]
+  );
 
   useEffect(() => {
     if (!setup || setup.locations.length === 0) {
@@ -305,6 +319,73 @@ export function CampaignArchitect() {
     }
   }
 
+  async function pushCompetitorFenceToGoogle(): Promise<void> {
+    if (!selectedLocation) {
+      return;
+    }
+
+    if (!linkedGoogleCampaign?.integration?.googleCampaignId) {
+      setGooglePushMessage("Activate Nissan live data first so a Google campaign is linked.");
+      return;
+    }
+
+    const primaryCompetitor = selectedLocation.competitorSuggestions[0];
+    if (!primaryCompetitor) {
+      setGooglePushMessage("No competitor is configured for this location.");
+      return;
+    }
+
+    const competitorKey = `${selectedLocation.id}:${primaryCompetitor.name}`;
+    const competitorAddress = (competitorAddresses[competitorKey] || primaryCompetitor.address || "").trim();
+    if (!competitorAddress) {
+      setGooglePushMessage("Enter the competitor address before pushing to Google Ads.");
+      return;
+    }
+
+    const radiusMiles = Math.max(0.3, Number((radiusFeet / 5280).toFixed(2)));
+
+    setIsPushingGoogle(true);
+    setGooglePushMessage("Pushing competitor geofence to Google Ads...");
+    try {
+      const response = await apiRequest<{
+        ok: boolean;
+        googleCampaignId: string;
+        competitorName: string;
+        radiusMiles: number;
+      }>(
+        "/api/integrations/google-ads/nissan/geofence/push",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            googleCampaignId: linkedGoogleCampaign.integration.googleCampaignId,
+            competitorName: primaryCompetitor.name,
+            competitorAddress,
+            radiusMiles,
+            centerLat: 33.8884365,
+            centerLng: -98.4861729,
+            replaceExisting: true,
+            validateOnly: false,
+            confirmNoEUPoliticalAds: true
+          })
+        },
+        apiBaseUrl
+      );
+
+      setGooglePushMessage(
+        `Google Ads geofence pushed: ${response.competitorName} at ${response.radiusMiles}mi on campaign ${response.googleCampaignId}.`
+      );
+      await refreshDashboard();
+    } catch (error) {
+      if (error instanceof Error) {
+        setGooglePushMessage(error.message);
+      } else {
+        setGooglePushMessage("Failed to push geofence to Google Ads.");
+      }
+    } finally {
+      setIsPushingGoogle(false);
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div className="tr-glass rounded-2xl p-4">
@@ -324,6 +405,18 @@ export function CampaignArchitect() {
               className="rounded-lg bg-tr-secondary px-4 py-2 text-sm font-semibold text-black"
             >
               Open Launch Modal
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                pushCompetitorFenceToGoogle().catch(() => {});
+              }}
+              disabled={isPushingGoogle}
+              className="rounded-lg border border-tr-primary/30 bg-tr-primary/10 px-4 py-2 text-sm text-tr-primary disabled:opacity-60"
+            >
+              <span className="inline-flex items-center gap-2">
+                <Link2 size={16} /> {isPushingGoogle ? "Pushing..." : "Push Competitor Fence to Google"}
+              </span>
             </button>
             <button
               type="button"
@@ -380,6 +473,12 @@ export function CampaignArchitect() {
       {launchMessage && (
         <div className="tr-glass flex items-center gap-2 rounded-xl border border-tr-secondary/30 p-3 text-sm text-zinc-200">
           <CheckCircle2 size={16} className="text-tr-secondary" /> {launchMessage}
+        </div>
+      )}
+
+      {googlePushMessage && (
+        <div className="tr-glass flex items-center gap-2 rounded-xl border border-tr-primary/30 p-3 text-sm text-zinc-200">
+          <Link2 size={16} className="text-tr-primary" /> {googlePushMessage}
         </div>
       )}
 

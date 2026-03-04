@@ -33,6 +33,22 @@ export interface Campaign {
   message: string;
   fences: Fence[];
   missingInputs: string[];
+  integration?: {
+    source?: string;
+    customerId?: string;
+    googleCampaignId?: string;
+    googleCampaignName?: string;
+    channelType?: string;
+    syncedAt?: string;
+    geofenceLastPushedAt?: string;
+    geofenceTarget?: {
+      competitorName: string;
+      competitorAddress: string;
+      radiusMiles: number;
+      centerLat: number;
+      centerLng: number;
+    };
+  };
 }
 
 export interface MatchBackEvent {
