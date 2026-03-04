@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, ArrowRightLeft, Crosshair, MousePointerClick, Radar, RefreshCcw } from "lucide-react";
+import { Activity, ArrowRightLeft, Crosshair, Link2, MousePointerClick, Radar, RefreshCcw } from "lucide-react";
 import { useTrueRankStore } from "../lib/store";
 
 function formatInteger(value: number): string {
@@ -25,9 +25,12 @@ export default function CommandCenter() {
   const refreshDashboard = useTrueRankStore((s) => s.refreshDashboard);
   const recordEvent = useTrueRankStore((s) => s.recordEvent);
   const simulateCampaign = useTrueRankStore((s) => s.simulateCampaign);
+  const activateNissanLiveData = useTrueRankStore((s) => s.activateNissanLiveData);
   const setActiveCampaign = useTrueRankStore((s) => s.setActiveCampaign);
 
   const [isSendingEvent, setIsSendingEvent] = useState(false);
+  const [isActivatingLive, setIsActivatingLive] = useState(false);
+  const [liveDataMessage, setLiveDataMessage] = useState("");
 
   const selectedCampaign = useMemo(
     () => campaigns.find((campaign) => campaign.id === activeCampaignId) || campaigns[0] || null,
@@ -85,6 +88,23 @@ export default function CommandCenter() {
     }
   }
 
+  async function handleActivateNissanLiveData(): Promise<void> {
+    setIsActivatingLive(true);
+    setLiveDataMessage("Connecting to Nissan Google Ads live feed...");
+    try {
+      const campaign = await activateNissanLiveData("nissan");
+      setLiveDataMessage(`Live feed active: ${campaign.name}`);
+    } catch (activationError) {
+      if (activationError instanceof Error) {
+        setLiveDataMessage(activationError.message);
+      } else {
+        setLiveDataMessage("Failed to activate Nissan live feed.");
+      }
+    } finally {
+      setIsActivatingLive(false);
+    }
+  }
+
   return (
     <section className="space-y-6">
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -116,13 +136,23 @@ export default function CommandCenter() {
               Focus metrics: impressions, clicks, CTR, and projected walk-ins. Total spend {formatCurrency(dashboard.totalSpend)}.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => refreshDashboard()}
-            className="inline-flex items-center gap-2 rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-xs text-zinc-200 hover:text-white"
-          >
-            <RefreshCcw size={14} /> Refresh
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={handleActivateNissanLiveData}
+              disabled={isActivatingLive}
+              className="inline-flex items-center gap-2 rounded-lg border border-tr-secondary/30 bg-tr-secondary/10 px-3 py-2 text-xs text-tr-secondary disabled:opacity-60"
+            >
+              <Link2 size={14} /> {isActivatingLive ? "Activating..." : "Activate Nissan Live Data"}
+            </button>
+            <button
+              type="button"
+              onClick={() => refreshDashboard()}
+              className="inline-flex items-center gap-2 rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-xs text-zinc-200 hover:text-white"
+            >
+              <RefreshCcw size={14} /> Refresh
+            </button>
+          </div>
         </div>
 
         <div className="grid gap-4 lg:grid-cols-[2fr,1fr]">
@@ -225,6 +255,7 @@ export default function CommandCenter() {
         <div className="mt-4 text-xs text-zinc-400">
           {loading ? "Loading..." : null}
           {error ? <span className="text-red-300">{error}</span> : null}
+          {liveDataMessage ? <span className="block text-tr-secondary">{liveDataMessage}</span> : null}
           {!loading && !error && lastSyncAt ? <span>Last sync: {new Date(lastSyncAt).toLocaleString()}</span> : null}
         </div>
       </div>

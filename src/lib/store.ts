@@ -163,6 +163,26 @@ interface EventResponse {
   dashboard: Dashboard;
 }
 
+interface ActivateNissanLiveResponse {
+  ok: boolean;
+  integration: string;
+  accountName: string;
+  customerId: string;
+  selectedGoogleCampaign: {
+    id: string;
+    name: string;
+    status: string;
+    channelType: string;
+    impressions: number;
+    clicks: number;
+    ctr: number;
+    costMicros: number;
+    cost: number;
+  };
+  linkedCampaign: Campaign;
+  dashboard: Dashboard;
+}
+
 interface TrueRankState {
   apiBaseUrl: string;
   campaigns: Campaign[];
@@ -184,6 +204,7 @@ interface TrueRankState {
   launchCampaign: (payload: LaunchCampaignInput) => Promise<Campaign>;
   recordEvent: (campaignId: string, type: "impression" | "click", count?: number) => Promise<void>;
   simulateCampaign: (campaignId: string, cycles?: number) => Promise<void>;
+  activateNissanLiveData: (campaignNameContains?: string) => Promise<Campaign>;
   setActiveCampaign: (campaignId: string | null) => void;
 }
 
@@ -357,6 +378,39 @@ export const useTrueRankStore = create<TrueRankState>((set, get) => ({
       }));
     } catch (error) {
       set({ error: toErrorMessage(error) });
+      throw error;
+    }
+  },
+
+  activateNissanLiveData: async (campaignNameContains = "") => {
+    set({ loading: true, error: null });
+
+    try {
+      const apiBaseUrl = get().apiBaseUrl;
+      const response = await apiRequest<ActivateNissanLiveResponse>(
+        "/api/integrations/google-ads/nissan/activate",
+        {
+          method: "POST",
+          body: JSON.stringify({ campaignNameContains })
+        },
+        apiBaseUrl
+      );
+
+      set((state) => {
+        const filtered = state.campaigns.filter((campaign) => campaign.id !== response.linkedCampaign.id);
+        return {
+          loading: false,
+          campaigns: [response.linkedCampaign, ...filtered],
+          dashboard: response.dashboard,
+          activeCampaignId: response.linkedCampaign.id,
+          lastSyncAt: new Date().toISOString(),
+          error: null
+        };
+      });
+
+      return response.linkedCampaign;
+    } catch (error) {
+      set({ loading: false, error: toErrorMessage(error) });
       throw error;
     }
   }

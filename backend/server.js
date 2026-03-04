@@ -1,4 +1,6 @@
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 const express = require("express");
 const cors = require("cors");
 
@@ -269,6 +271,386 @@ function haversineMiles(lat1, lng1, lat2, lng2) {
   return earthRadiusMiles * c;
 }
 
+const GOOGLE_TOKEN_URI_FALLBACK = "https://oauth2.googleapis.com/token";
+const GOOGLE_API_VERSION_FALLBACK = "v22";
+const NISSAN_WICHITA_FALLS_CUSTOMER_ID = "7891399350";
+const NISSAN_WICHITA_FALLS_ACCOUNT_NAME = "Nissan Wichita Falls";
+const NISSAN_WICHITA_FALLS_ADDRESS = "Nissan Wichita Falls (address to be confirmed)";
+
+const googleAdsTokenCache = {
+  accessToken: null,
+  expiresAt: 0
+};
+
+function digitsOnly(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
+function asPositiveNumber(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function firstDefined(object, keys, fallback = undefined) {
+  for (const key of keys) {
+    if (object && object[key] !== undefined && object[key] !== null) {
+      return object[key];
+    }
+  }
+  return fallback;
+}
+
+function resolveSecretsPath(fileRef) {
+  const trimmed = String(fileRef || "").trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (path.isAbsolute(trimmed)) {
+    return trimmed;
+  }
+
+  const candidates = [
+    path.resolve(process.cwd(), trimmed),
+    path.resolve(__dirname, trimmed),
+    path.resolve(process.cwd(), "..", trimmed),
+    path.resolve(__dirname, "..", trimmed)
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return candidates[0];
+}
+
+function getGoogleAdsOAuthConfig() {
+  const directClientId = process.env.GOOGLE_ADS_CLIENT_ID || process.env.GOOGLE_OAUTH_CLIENT_ID || "";
+  const directClientSecret = process.env.GOOGLE_ADS_CLIENT_SECRET || process.env.GOOGLE_OAUTH_CLIENT_SECRET || "";
+
+  if (directClientId && directClientSecret) {
+    return {
+      source: "env",
+      clientId: directClientId,
+      clientSecret: directClientSecret,
+      tokenUri: process.env.GOOGLE_ADS_OAUTH_TOKEN_URI || GOOGLE_TOKEN_URI_FALLBACK
+    };
+  }
+
+  const secretsFileRef = process.env.GOOGLE_OAUTH_CLIENT_SECRETS_FILE || "";
+  if (!secretsFileRef) {
+    throw new Error(
+      "Missing OAuth configuration. Set GOOGLE_ADS_CLIENT_ID/GOOGLE_ADS_CLIENT_SECRET or GOOGLE_OAUTH_CLIENT_SECRETS_FILE."
+    );
+  }
+
+  const resolvedPath = resolveSecretsPath(secretsFileRef);
+  if (!resolvedPath || !fs.existsSync(resolvedPath)) {
+    throw new Error(`OAuth client secrets file not found: ${secretsFileRef}`);
+  }
+
+  const raw = JSON.parse(fs.readFileSync(resolvedPath, "utf8"));
+  const container = raw.installed || raw.web;
+  if (!container || !container.client_id || !container.client_secret) {
+    throw new Error("OAuth client secrets file is missing client_id/client_secret.");
+  }
+
+  return {
+    source: "file",
+    filePath: resolvedPath,
+    clientId: container.client_id,
+    clientSecret: container.client_secret,
+    tokenUri: container.token_uri || GOOGLE_TOKEN_URI_FALLBACK
+  };
+}
+
+function getGoogleAdsIntegrationStatus() {
+  const developerTokenReady = Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN);
+  const refreshTokenReady = Boolean(process.env.GOOGLE_ADS_REFRESH_TOKEN);
+  const loginCustomerId = digitsOnly(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || "");
+  const customerId = digitsOnly(
+    process.env.GOOGLE_ADS_NISSAN_CUSTOMER_ID || process.env.GOOGLE_ADS_CUSTOMER_ID || NISSAN_WICHITA_FALLS_CUSTOMER_ID
+  );
+
+  let oauth = { ready: false, source: "missing", error: "OAuth config missing" };
+  try {
+    const oauthConfig = getGoogleAdsOAuthConfig();
+    oauth = {
+      ready: true,
+      source: oauthConfig.source,
+      filePath: oauthConfig.filePath || null,
+      tokenUri: oauthConfig.tokenUri
+    };
+  } catch (error) {
+    oauth = {
+      ready: false,
+      source: "missing",
+      error: error instanceof Error ? error.message : "OAuth configuration error"
+    };
+  }
+
+  return {
+    ready: developerTokenReady && refreshTokenReady && oauth.ready && Boolean(customerId),
+    developerTokenReady,
+    refreshTokenReady,
+    loginCustomerIdSet: Boolean(loginCustomerId),
+    nissanCustomerId: customerId || null,
+    apiVersion: process.env.GOOGLE_ADS_API_VERSION || GOOGLE_API_VERSION_FALLBACK,
+    oauth
+  };
+}
+
+async function fetchGoogleAdsAccessToken() {
+  if (googleAdsTokenCache.accessToken && Date.now() < googleAdsTokenCache.expiresAt) {
+    return googleAdsTokenCache.accessToken;
+  }
+
+  const refreshToken = process.env.GOOGLE_ADS_REFRESH_TOKEN;
+  if (!refreshToken) {
+    throw new Error("Missing GOOGLE_ADS_REFRESH_TOKEN.");
+  }
+
+  const oauth = getGoogleAdsOAuthConfig();
+  const payload = new URLSearchParams({
+    client_id: oauth.clientId,
+    client_secret: oauth.clientSecret,
+    refresh_token: refreshToken,
+    grant_type: "refresh_token"
+  });
+
+  const tokenResponse = await fetch(oauth.tokenUri, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: payload.toString()
+  });
+
+  const tokenJson = await tokenResponse.json().catch(() => ({}));
+  if (!tokenResponse.ok || !tokenJson.access_token) {
+    const errorMessage =
+      tokenJson.error_description || tokenJson.error || `OAuth token request failed (${tokenResponse.status}).`;
+    throw new Error(errorMessage);
+  }
+
+  const expiresIn = Math.max(120, asPositiveNumber(tokenJson.expires_in, 3600));
+  googleAdsTokenCache.accessToken = tokenJson.access_token;
+  googleAdsTokenCache.expiresAt = Date.now() + (expiresIn - 60) * 1000;
+  return googleAdsTokenCache.accessToken;
+}
+
+function parseGoogleAdsApiError(payload, statusCode) {
+  if (Array.isArray(payload) && payload.length > 0) {
+    const first = payload[0];
+    if (first?.error?.message) {
+      return `${first.error.message} (HTTP ${statusCode})`;
+    }
+  }
+  if (payload?.error?.message) {
+    return `${payload.error.message} (HTTP ${statusCode})`;
+  }
+  return `Google Ads API request failed (${statusCode}).`;
+}
+
+async function googleAdsSearchStream(customerId, query) {
+  const customerIdDigits = digitsOnly(customerId);
+  if (!customerIdDigits) {
+    throw new Error("A Google Ads customer ID is required.");
+  }
+
+  const developerToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
+  if (!developerToken) {
+    throw new Error("Missing GOOGLE_ADS_DEVELOPER_TOKEN.");
+  }
+
+  const accessToken = await fetchGoogleAdsAccessToken();
+  const apiVersion = process.env.GOOGLE_ADS_API_VERSION || GOOGLE_API_VERSION_FALLBACK;
+  const loginCustomerId = digitsOnly(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || "");
+
+  const requestHeaders = {
+    Authorization: `Bearer ${accessToken}`,
+    "Content-Type": "application/json",
+    "developer-token": developerToken
+  };
+
+  if (loginCustomerId) {
+    requestHeaders["login-customer-id"] = loginCustomerId;
+  }
+
+  const response = await fetch(
+    `https://googleads.googleapis.com/${apiVersion}/customers/${customerIdDigits}/googleAds:searchStream`,
+    {
+      method: "POST",
+      headers: requestHeaders,
+      body: JSON.stringify({ query })
+    }
+  );
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(parseGoogleAdsApiError(payload, response.status));
+  }
+
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+  return [payload];
+}
+
+function normalizeGoogleCampaignRow(row) {
+  const campaign = row.campaign || {};
+  const metrics = row.metrics || {};
+
+  const impressions = asPositiveNumber(firstDefined(metrics, ["impressions"], 0), 0);
+  const clicks = asPositiveNumber(firstDefined(metrics, ["clicks"], 0), 0);
+  const costMicros = asPositiveNumber(firstDefined(metrics, ["costMicros", "cost_micros"], 0), 0);
+
+  return {
+    id: String(campaign.id || ""),
+    name: String(campaign.name || "Unnamed Campaign"),
+    status: String(campaign.status || "UNKNOWN"),
+    channelType: String(firstDefined(campaign, ["advertisingChannelType", "advertising_channel_type"], "UNKNOWN")),
+    impressions,
+    clicks,
+    ctr: impressions > 0 ? Number(((clicks / impressions) * 100).toFixed(2)) : 0,
+    costMicros,
+    cost: Number((costMicros / 1_000_000).toFixed(2))
+  };
+}
+
+async function listGoogleAdsCampaignRows(customerId) {
+  const query = `
+    SELECT
+      campaign.id,
+      campaign.name,
+      campaign.status,
+      campaign.advertising_channel_type,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.cost_micros
+    FROM campaign
+    WHERE campaign.status != 'REMOVED'
+      AND segments.date DURING LAST_30_DAYS
+    ORDER BY metrics.clicks DESC
+    LIMIT 50
+  `;
+
+  const chunks = await googleAdsSearchStream(customerId, query);
+  const rows = [];
+  for (const chunk of chunks) {
+    if (Array.isArray(chunk.results)) {
+      for (const row of chunk.results) {
+        rows.push(normalizeGoogleCampaignRow(row));
+      }
+    }
+  }
+
+  return rows.filter((row) => row.id);
+}
+
+function selectNissanCampaign(rows, requestedCampaignId, campaignNameContains) {
+  const requestedId = digitsOnly(requestedCampaignId || "");
+  if (requestedId) {
+    const byId = rows.find((row) => digitsOnly(row.id) === requestedId);
+    if (byId) {
+      return byId;
+    }
+    throw new Error(`Requested Google campaign ID ${requestedId} was not found in this account.`);
+  }
+
+  const byName = String(campaignNameContains || "").trim().toLowerCase();
+  const filteredByName = byName ? rows.filter((row) => row.name.toLowerCase().includes(byName)) : rows;
+  const enabled = filteredByName.filter((row) => row.status === "ENABLED");
+  const withClicks = enabled.filter((row) => row.clicks > 0);
+
+  return withClicks[0] || enabled[0] || filteredByName[0] || rows[0] || null;
+}
+
+function upsertGoogleAdsCampaign(customerId, accountName, selectedCampaign) {
+  const customerDigits = digitsOnly(customerId);
+  const now = new Date().toISOString();
+
+  let campaign = campaigns.find(
+    (item) => item.integration?.source === "google_ads" && item.integration?.customerId === customerDigits
+  );
+
+  if (!campaign) {
+    campaign = {
+      id: createId("campaign"),
+      name: `${accountName} Live Feed`,
+      status: "active",
+      createdAt: now,
+      dealershipName: accountName,
+      dealershipAddress: NISSAN_WICHITA_FALLS_ADDRESS,
+      locationId: "nissan-live-feed",
+      platforms: ["google"],
+      retargetDays: 21,
+      dailyBudget: 100,
+      monthlyBudgetEstimate: 3000,
+      baseCpm: 8.5,
+      cpcEstimate: 2.4,
+      ctaUrl: "",
+      message: "NO GAMES - Just Honest Pricing and Extraordinary Service",
+      fences: [
+        {
+          id: createId("fence"),
+          type: "home",
+          locationName: accountName,
+          address: NISSAN_WICHITA_FALLS_ADDRESS,
+          radiusFeet: 500,
+          dwellTimeMin: 12,
+          velocityMax: 6,
+          isEVMode: false,
+          coordinates: []
+        }
+      ],
+      missingInputs: [],
+      integration: {
+        source: "google_ads",
+        customerId: customerDigits
+      }
+    };
+
+    campaigns.unshift(campaign);
+  }
+
+  campaign.name = `${accountName} Live Feed - ${selectedCampaign.name}`;
+  campaign.status = selectedCampaign.status === "ENABLED" ? "active" : "paused";
+  campaign.platforms = ["google"];
+  campaign.dealershipName = accountName;
+  campaign.dealershipAddress = NISSAN_WICHITA_FALLS_ADDRESS;
+  campaign.integration = {
+    source: "google_ads",
+    customerId: customerDigits,
+    googleCampaignId: digitsOnly(selectedCampaign.id),
+    googleCampaignName: selectedCampaign.name,
+    channelType: selectedCampaign.channelType,
+    syncedAt: now
+  };
+
+  const metrics = getCampaignMetrics(campaign.id);
+  metrics.impressions = selectedCampaign.impressions;
+  metrics.clicks = selectedCampaign.clicks;
+  metrics.spend = selectedCampaign.cost;
+  metrics.walkIns = Math.floor(selectedCampaign.clicks * 0.12);
+  metrics.lastUpdatedAt = now;
+
+  pushLiveEvent({
+    id: createId("event"),
+    campaignId: campaign.id,
+    campaignName: campaign.name,
+    timestamp: now,
+    type: "google_ads_sync",
+    velocityMph: 0,
+    dwellTimeMin: 0,
+    result: `Synced live Google Ads metrics from ${selectedCampaign.name}.`,
+    competitorLot: accountName,
+    deviceId: "GADS"
+  });
+
+  return { campaign, metrics };
+}
+
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
@@ -280,6 +662,9 @@ app.get("/", (_req, res) => {
       dashboard: "GET /api/dashboard",
       recordEvent: "POST /api/campaigns/:id/events",
       simulate: "POST /api/campaigns/:id/simulate",
+      googleAdsStatus: "GET /api/integrations/google-ads/status",
+      googleAdsNissanCampaigns: "GET /api/integrations/google-ads/nissan/campaigns",
+      googleAdsNissanActivate: "POST /api/integrations/google-ads/nissan/activate",
       geofenceCheck: "POST /api/geofence/check"
     }
   });
@@ -301,6 +686,94 @@ app.get("/api/setup-template", (_req, res) => {
     creativeRequirements: CREATIVE_REQUIREMENTS,
     platformOptions: PLATFORM_OPTIONS
   });
+});
+
+app.get("/api/integrations/google-ads/status", (_req, res) => {
+  const status = getGoogleAdsIntegrationStatus();
+  res.json({
+    ok: true,
+    integration: "google_ads",
+    status
+  });
+});
+
+app.get("/api/integrations/google-ads/nissan/campaigns", async (req, res) => {
+  try {
+    const customerId = digitsOnly(
+      req.query.customerId ||
+        process.env.GOOGLE_ADS_NISSAN_CUSTOMER_ID ||
+        process.env.GOOGLE_ADS_CUSTOMER_ID ||
+        NISSAN_WICHITA_FALLS_CUSTOMER_ID
+    );
+    const accountName = process.env.GOOGLE_ADS_NISSAN_ACCOUNT_NAME || NISSAN_WICHITA_FALLS_ACCOUNT_NAME;
+
+    if (!customerId) {
+      res.status(400).json({ ok: false, error: "No Nissan customer ID configured." });
+      return;
+    }
+
+    const rows = await listGoogleAdsCampaignRows(customerId);
+    res.json({
+      ok: true,
+      accountName,
+      customerId,
+      campaigns: rows
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load Nissan campaigns from Google Ads.";
+    const statusCode = message.toLowerCase().includes("missing") ? 400 : 500;
+    res.status(statusCode).json({ ok: false, error: message });
+  }
+});
+
+app.post("/api/integrations/google-ads/nissan/activate", async (req, res) => {
+  try {
+    const customerId = digitsOnly(
+      req.body.customerId ||
+        process.env.GOOGLE_ADS_NISSAN_CUSTOMER_ID ||
+        process.env.GOOGLE_ADS_CUSTOMER_ID ||
+        NISSAN_WICHITA_FALLS_CUSTOMER_ID
+    );
+    const accountName = process.env.GOOGLE_ADS_NISSAN_ACCOUNT_NAME || NISSAN_WICHITA_FALLS_ACCOUNT_NAME;
+    const requestedCampaignId = req.body.googleCampaignId || req.body.campaignId || "";
+    const campaignNameContains = req.body.campaignNameContains || "";
+
+    if (!customerId) {
+      res.status(400).json({ ok: false, error: "No Nissan customer ID configured." });
+      return;
+    }
+
+    const rows = await listGoogleAdsCampaignRows(customerId);
+    if (rows.length === 0) {
+      res.status(404).json({ ok: false, error: "No Google Ads campaigns returned for this Nissan account." });
+      return;
+    }
+
+    const selected = selectNissanCampaign(rows, requestedCampaignId, campaignNameContains);
+    if (!selected) {
+      res.status(404).json({ ok: false, error: "No campaign available to activate." });
+      return;
+    }
+
+    const synced = upsertGoogleAdsCampaign(customerId, accountName, selected);
+
+    res.json({
+      ok: true,
+      integration: "google_ads",
+      accountName,
+      customerId,
+      selectedGoogleCampaign: selected,
+      linkedCampaign: synced.campaign,
+      linkedMetrics: synced.metrics,
+      dashboard: calculateDashboard(),
+      availableCampaigns: rows.slice(0, 20)
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to activate Nissan live data feed.";
+    const statusCode =
+      message.toLowerCase().includes("missing") || message.toLowerCase().includes("not found") ? 400 : 500;
+    res.status(statusCode).json({ ok: false, error: message });
+  }
 });
 
 app.get("/api/campaigns", (_req, res) => {
