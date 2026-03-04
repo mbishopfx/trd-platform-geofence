@@ -78,7 +78,7 @@ const SETUP_TEMPLATE = {
       address: "4000 Kell West Blvd, Wichita Falls, TX 76309",
       coordinates: { lat: 33.8806084, lng: -98.5460791 },
       requiredCompetitorCount: 1,
-      competitorSuggestions: [{ name: "Patterson Honda", address: "319 Central East Fwy, Wichita Falls, TX 76302" }]
+      competitorSuggestions: [{ name: "Patterson Honda", address: "319 Central East Fwy, Wichita Falls, TX 76301" }]
     }
   ],
   trackingGoals: ["impressions", "clicks", "ctr", "store visits/calls/directions where available"]
@@ -266,7 +266,7 @@ const NISSAN_WICHITA_FALLS_ADDRESS = "4000 Kell West Blvd, Wichita Falls, TX 763
 const NISSAN_WICHITA_FALLS_LAT = 33.8806084;
 const NISSAN_WICHITA_FALLS_LNG = -98.5460791;
 const WICHITA_DEFAULT_COMPETITOR_NAME = "Patterson Honda";
-const WICHITA_DEFAULT_COMPETITOR_ADDRESS = "319 Central East Fwy, Wichita Falls, TX 76302";
+const WICHITA_DEFAULT_COMPETITOR_ADDRESS = "319 Central East Fwy, Wichita Falls, TX 76301";
 const WICHITA_DEFAULT_COMPETITOR_LAT = 33.8884365;
 const WICHITA_DEFAULT_COMPETITOR_LNG = -98.4861729;
 const WICHITA_DEFAULT_COMPETITOR_RADIUS_MILES = 1;
@@ -784,7 +784,7 @@ async function pushNissanCompetitorGeofenceToGoogle(options = {}) {
           streetAddress: competitorAddress,
           cityName: "Wichita Falls",
           provinceCode: "TX",
-          postalCode: "76302",
+          postalCode: "76301",
           countryCode: "US"
         }
       }
