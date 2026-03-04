@@ -1,4 +1,4 @@
-# trd-geofence
+# trd-platform-geofence
 
 TrueRankDigital Geo-Conquest Engine (full-stack):
 

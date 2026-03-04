@@ -1,6 +1,6 @@
 export const DEFAULT_API_BASE_URL =
   (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() ||
-  "https://trd-geofence-production.up.railway.app";
+  "https://trd-platform-geofence-production.up.railway.app";
 
 export function normalizeApiBaseUrl(value: string): string {
   const trimmed = value.trim();
