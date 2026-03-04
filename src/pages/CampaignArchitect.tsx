@@ -119,7 +119,7 @@ export function CampaignArchitect() {
       return;
     }
 
-    const map = L.map(mapRef.current).setView([40.355, -74.075], 13);
+    const map = L.map(mapRef.current).setView([33.8806084, -98.5460791], 13);
 
     L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
       attribution: "&copy; TrueRankDigital Engine",
