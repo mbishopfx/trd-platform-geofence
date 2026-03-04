@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet-draw";
-import { CheckCircle2, Crosshair, Link2, Rocket, Wrench, X } from "lucide-react";
+import { CheckCircle2, Crosshair, Link2, Rocket, SlidersHorizontal, Wrench, X } from "lucide-react";
 import { apiRequest } from "../lib/api";
 import { type SetupLocation, useTrueRankStore } from "../lib/store";
 
@@ -386,6 +386,21 @@ export function CampaignArchitect() {
     }
   }
 
+  function applyNearSniperPreset(): void {
+    setRadiusFeet(5280);
+    setDwellTime(12);
+    setVelocityMax(6);
+    setRetargetDays(21);
+    setPlatforms((current) => ({
+      ...current,
+      google: true,
+      meta: true
+    }));
+    setLaunchMessage(
+      "Near-Sniper preset applied: 1-mile radius, 12 min dwell, 6 mph max, 21-day retarget window."
+    );
+  }
+
   return (
     <div className="space-y-4">
       <div className="tr-glass rounded-2xl p-4">
@@ -399,6 +414,15 @@ export function CampaignArchitect() {
             </p>
           </div>
           <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={applyNearSniperPreset}
+              className="rounded-lg border border-white/15 bg-black/25 px-4 py-2 text-sm text-zinc-200"
+            >
+              <span className="inline-flex items-center gap-2">
+                <SlidersHorizontal size={16} /> Apply Near-Sniper Preset
+              </span>
+            </button>
             <button
               type="button"
               onClick={() => setIsModalOpen(true)}
