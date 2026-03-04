@@ -882,7 +882,10 @@ function upsertGoogleAdsCampaign(customerId, accountName, selectedCampaign, opti
   campaign.platforms = ["google"];
   campaign.dealershipName = accountName;
   campaign.dealershipAddress = NISSAN_WICHITA_FALLS_ADDRESS;
+  const previousIntegration =
+    campaign.integration && typeof campaign.integration === "object" ? campaign.integration : {};
   campaign.integration = {
+    ...previousIntegration,
     source: "google_ads",
     customerId: customerDigits,
     googleCampaignId: digitsOnly(selectedCampaign.id),
