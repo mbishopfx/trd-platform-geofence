@@ -276,11 +276,28 @@ const GOOGLE_API_VERSION_FALLBACK = "v22";
 const NISSAN_WICHITA_FALLS_CUSTOMER_ID = "7891399350";
 const NISSAN_WICHITA_FALLS_ACCOUNT_NAME = "Nissan Wichita Falls";
 const NISSAN_WICHITA_FALLS_ADDRESS = "Nissan Wichita Falls (address to be confirmed)";
+const GOOGLE_ADS_AUTO_SYNC_DEFAULT_INTERVAL_SEC = 300;
+const AUTO_SYNC_SUPPORTED_TRIGGERS = new Set(["startup", "interval", "manual", "activation"]);
 
 const googleAdsTokenCache = {
   accessToken: null,
   expiresAt: 0
 };
+
+const googleAdsAutoSyncState = {
+  enabled: String(process.env.GOOGLE_ADS_AUTO_SYNC_ENABLED || "true").trim().toLowerCase() !== "false",
+  intervalSec: Math.max(60, Math.floor(asPositiveNumber(process.env.GOOGLE_ADS_AUTO_SYNC_INTERVAL_SEC, GOOGLE_ADS_AUTO_SYNC_DEFAULT_INTERVAL_SEC))),
+  timerActive: false,
+  running: false,
+  tickCount: 0,
+  nextRunAt: null,
+  lastRunStartedAt: null,
+  lastRunCompletedAt: null,
+  lastSuccessfulSyncAt: null,
+  lastError: null,
+  lastSummary: null
+};
+let googleAdsAutoSyncTimer = null;
 
 function digitsOnly(value) {
   return String(value || "").replace(/\D/g, "");
@@ -399,6 +416,42 @@ function getGoogleAdsIntegrationStatus() {
     nissanCustomerId: customerId || null,
     apiVersion: process.env.GOOGLE_ADS_API_VERSION || GOOGLE_API_VERSION_FALLBACK,
     oauth
+  };
+}
+
+function getNissanCustomerId() {
+  return digitsOnly(
+    process.env.GOOGLE_ADS_NISSAN_CUSTOMER_ID || process.env.GOOGLE_ADS_CUSTOMER_ID || NISSAN_WICHITA_FALLS_CUSTOMER_ID
+  );
+}
+
+function getNissanAccountName() {
+  return process.env.GOOGLE_ADS_NISSAN_ACCOUNT_NAME || NISSAN_WICHITA_FALLS_ACCOUNT_NAME;
+}
+
+function setGoogleAdsAutoSyncNextRun() {
+  if (!googleAdsAutoSyncState.enabled || !googleAdsAutoSyncState.timerActive) {
+    googleAdsAutoSyncState.nextRunAt = null;
+    return;
+  }
+  const next = Date.now() + googleAdsAutoSyncState.intervalSec * 1000;
+  googleAdsAutoSyncState.nextRunAt = new Date(next).toISOString();
+}
+
+function getGoogleAdsAutoSyncStatus() {
+  return {
+    enabled: googleAdsAutoSyncState.enabled,
+    timerActive: googleAdsAutoSyncState.timerActive,
+    running: googleAdsAutoSyncState.running,
+    intervalSec: googleAdsAutoSyncState.intervalSec,
+    intervalMinutes: Number((googleAdsAutoSyncState.intervalSec / 60).toFixed(2)),
+    tickCount: googleAdsAutoSyncState.tickCount,
+    nextRunAt: googleAdsAutoSyncState.nextRunAt,
+    lastRunStartedAt: googleAdsAutoSyncState.lastRunStartedAt,
+    lastRunCompletedAt: googleAdsAutoSyncState.lastRunCompletedAt,
+    lastSuccessfulSyncAt: googleAdsAutoSyncState.lastSuccessfulSyncAt,
+    lastError: googleAdsAutoSyncState.lastError,
+    lastSummary: googleAdsAutoSyncState.lastSummary
   };
 }
 
@@ -566,8 +619,9 @@ function selectNissanCampaign(rows, requestedCampaignId, campaignNameContains) {
   return withClicks[0] || enabled[0] || filteredByName[0] || rows[0] || null;
 }
 
-function upsertGoogleAdsCampaign(customerId, accountName, selectedCampaign) {
+function upsertGoogleAdsCampaign(customerId, accountName, selectedCampaign, options = {}) {
   const customerDigits = digitsOnly(customerId);
+  const syncSource = String(options.syncSource || "manual");
   const now = new Date().toISOString();
 
   let campaign = campaigns.find(
@@ -629,11 +683,25 @@ function upsertGoogleAdsCampaign(customerId, accountName, selectedCampaign) {
   };
 
   const metrics = getCampaignMetrics(campaign.id);
+  const previousMetrics = {
+    impressions: metrics.impressions,
+    clicks: metrics.clicks,
+    spend: metrics.spend
+  };
   metrics.impressions = selectedCampaign.impressions;
   metrics.clicks = selectedCampaign.clicks;
   metrics.spend = selectedCampaign.cost;
   metrics.walkIns = Math.floor(selectedCampaign.clicks * 0.12);
   metrics.lastUpdatedAt = now;
+
+  const deltaImpressions = metrics.impressions - previousMetrics.impressions;
+  const deltaClicks = metrics.clicks - previousMetrics.clicks;
+  const deltaSpend = Number((metrics.spend - previousMetrics.spend).toFixed(2));
+  const sourcePrefix =
+    syncSource === "auto" ? "Auto-sync" : syncSource === "activation" ? "Activation sync" : "Manual sync";
+  const deltaLabel = `${deltaImpressions >= 0 ? "+" : ""}${deltaImpressions} impressions, ${
+    deltaClicks >= 0 ? "+" : ""
+  }${deltaClicks} clicks, ${deltaSpend >= 0 ? "+" : ""}$${deltaSpend.toFixed(2)} spend`;
 
   pushLiveEvent({
     id: createId("event"),
@@ -643,12 +711,136 @@ function upsertGoogleAdsCampaign(customerId, accountName, selectedCampaign) {
     type: "google_ads_sync",
     velocityMph: 0,
     dwellTimeMin: 0,
-    result: `Synced live Google Ads metrics from ${selectedCampaign.name}.`,
+    result: `${sourcePrefix} refreshed ${selectedCampaign.name} (${deltaLabel}).`,
     competitorLot: accountName,
     deviceId: "GADS"
   });
 
   return { campaign, metrics };
+}
+
+async function syncNissanGoogleAdsLiveData(options = {}) {
+  const customerId = digitsOnly(options.customerId || getNissanCustomerId());
+  const accountName = String(options.accountName || getNissanAccountName());
+  const requestedCampaignId = options.requestedCampaignId || "";
+  const campaignNameContains = options.campaignNameContains || "";
+  const syncSource = options.syncSource || "manual";
+
+  if (!customerId) {
+    throw new Error("No Nissan customer ID configured.");
+  }
+
+  const rows = await listGoogleAdsCampaignRows(customerId);
+  if (rows.length === 0) {
+    throw new Error("No Google Ads campaigns returned for this Nissan account.");
+  }
+
+  const selected = selectNissanCampaign(rows, requestedCampaignId, campaignNameContains);
+  if (!selected) {
+    throw new Error("No campaign available to sync.");
+  }
+
+  const synced = upsertGoogleAdsCampaign(customerId, accountName, selected, { syncSource });
+  return {
+    accountName,
+    customerId,
+    rows,
+    selected,
+    synced
+  };
+}
+
+async function runGoogleAdsAutoSyncTick(options = {}) {
+  const trigger = AUTO_SYNC_SUPPORTED_TRIGGERS.has(String(options.trigger || "manual"))
+    ? String(options.trigger || "manual")
+    : "manual";
+
+  const isAutoTrigger = trigger === "startup" || trigger === "interval";
+  if (isAutoTrigger && !googleAdsAutoSyncState.enabled) {
+    return null;
+  }
+
+  if (googleAdsAutoSyncState.running) {
+    return null;
+  }
+
+  googleAdsAutoSyncState.running = true;
+  googleAdsAutoSyncState.lastError = null;
+  googleAdsAutoSyncState.lastRunStartedAt = new Date().toISOString();
+
+  try {
+    const integrationStatus = getGoogleAdsIntegrationStatus();
+    if (!integrationStatus.ready) {
+      throw new Error("Google Ads integration is not ready.");
+    }
+
+    const customerId = digitsOnly(options.customerId || getNissanCustomerId());
+    const linkedCampaign = campaigns.find(
+      (item) => item.integration?.source === "google_ads" && digitsOnly(item.integration?.customerId) === customerId
+    );
+
+    const requestedCampaignId = options.requestedCampaignId || linkedCampaign?.integration?.googleCampaignId || "";
+    const campaignNameContains =
+      options.campaignNameContains ||
+      process.env.GOOGLE_ADS_AUTO_SYNC_CAMPAIGN_NAME_CONTAINS ||
+      linkedCampaign?.integration?.googleCampaignName ||
+      "nissan";
+
+    const result = await syncNissanGoogleAdsLiveData({
+      customerId,
+      accountName: options.accountName || getNissanAccountName(),
+      requestedCampaignId,
+      campaignNameContains,
+      syncSource: trigger === "activation" ? "activation" : isAutoTrigger ? "auto" : "manual"
+    });
+
+    const completedAt = new Date().toISOString();
+    googleAdsAutoSyncState.tickCount += 1;
+    googleAdsAutoSyncState.lastSuccessfulSyncAt = completedAt;
+    googleAdsAutoSyncState.lastSummary = `${trigger} sync refreshed ${result.selected.name}.`;
+
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Google Ads sync failed.";
+    googleAdsAutoSyncState.lastError = message;
+    googleAdsAutoSyncState.lastSummary = `${trigger} sync failed: ${message}`;
+    throw error;
+  } finally {
+    googleAdsAutoSyncState.running = false;
+    googleAdsAutoSyncState.lastRunCompletedAt = new Date().toISOString();
+    setGoogleAdsAutoSyncNextRun();
+  }
+}
+
+function startGoogleAdsAutoSyncScheduler() {
+  if (!googleAdsAutoSyncState.enabled) {
+    googleAdsAutoSyncState.timerActive = false;
+    googleAdsAutoSyncState.nextRunAt = null;
+    console.log("Google Ads auto-sync disabled by GOOGLE_ADS_AUTO_SYNC_ENABLED=false");
+    return;
+  }
+
+  if (googleAdsAutoSyncTimer) {
+    clearInterval(googleAdsAutoSyncTimer);
+  }
+
+  const intervalMs = googleAdsAutoSyncState.intervalSec * 1000;
+  googleAdsAutoSyncTimer = setInterval(() => {
+    runGoogleAdsAutoSyncTick({ trigger: "interval" }).catch((error) => {
+      console.error("Google Ads auto-sync interval run failed:", error.message || error);
+    });
+  }, intervalMs);
+  googleAdsAutoSyncState.timerActive = true;
+  setGoogleAdsAutoSyncNextRun();
+
+  const runOnStart = String(process.env.GOOGLE_ADS_AUTO_SYNC_RUN_ON_START || "true").trim().toLowerCase() !== "false";
+  if (runOnStart) {
+    runGoogleAdsAutoSyncTick({ trigger: "startup" }).catch((error) => {
+      console.error("Google Ads auto-sync startup run failed:", error.message || error);
+    });
+  }
+
+  console.log(`Google Ads auto-sync scheduled every ${googleAdsAutoSyncState.intervalSec} seconds.`);
 }
 
 app.get("/", (_req, res) => {
@@ -665,6 +857,7 @@ app.get("/", (_req, res) => {
       googleAdsStatus: "GET /api/integrations/google-ads/status",
       googleAdsNissanCampaigns: "GET /api/integrations/google-ads/nissan/campaigns",
       googleAdsNissanActivate: "POST /api/integrations/google-ads/nissan/activate",
+      googleAdsNissanSyncNow: "POST /api/integrations/google-ads/nissan/sync-now",
       geofenceCheck: "POST /api/geofence/check"
     }
   });
@@ -693,7 +886,8 @@ app.get("/api/integrations/google-ads/status", (_req, res) => {
   res.json({
     ok: true,
     integration: "google_ads",
-    status
+    status,
+    autoSync: getGoogleAdsAutoSyncStatus()
   });
 });
 
@@ -728,50 +922,69 @@ app.get("/api/integrations/google-ads/nissan/campaigns", async (req, res) => {
 
 app.post("/api/integrations/google-ads/nissan/activate", async (req, res) => {
   try {
-    const customerId = digitsOnly(
-      req.body.customerId ||
-        process.env.GOOGLE_ADS_NISSAN_CUSTOMER_ID ||
-        process.env.GOOGLE_ADS_CUSTOMER_ID ||
-        NISSAN_WICHITA_FALLS_CUSTOMER_ID
-    );
-    const accountName = process.env.GOOGLE_ADS_NISSAN_ACCOUNT_NAME || NISSAN_WICHITA_FALLS_ACCOUNT_NAME;
-    const requestedCampaignId = req.body.googleCampaignId || req.body.campaignId || "";
-    const campaignNameContains = req.body.campaignNameContains || "";
+    const result = await runGoogleAdsAutoSyncTick({
+      trigger: "activation",
+      customerId: req.body.customerId,
+      requestedCampaignId: req.body.googleCampaignId || req.body.campaignId || "",
+      campaignNameContains: req.body.campaignNameContains || "",
+      accountName: req.body.accountName || getNissanAccountName()
+    });
 
-    if (!customerId) {
-      res.status(400).json({ ok: false, error: "No Nissan customer ID configured." });
+    if (!result) {
+      res.status(409).json({ ok: false, error: "Google Ads sync is already running. Try again in a few seconds." });
       return;
     }
-
-    const rows = await listGoogleAdsCampaignRows(customerId);
-    if (rows.length === 0) {
-      res.status(404).json({ ok: false, error: "No Google Ads campaigns returned for this Nissan account." });
-      return;
-    }
-
-    const selected = selectNissanCampaign(rows, requestedCampaignId, campaignNameContains);
-    if (!selected) {
-      res.status(404).json({ ok: false, error: "No campaign available to activate." });
-      return;
-    }
-
-    const synced = upsertGoogleAdsCampaign(customerId, accountName, selected);
 
     res.json({
       ok: true,
       integration: "google_ads",
-      accountName,
-      customerId,
-      selectedGoogleCampaign: selected,
-      linkedCampaign: synced.campaign,
-      linkedMetrics: synced.metrics,
+      accountName: result.accountName,
+      customerId: result.customerId,
+      selectedGoogleCampaign: result.selected,
+      linkedCampaign: result.synced.campaign,
+      linkedMetrics: result.synced.metrics,
       dashboard: calculateDashboard(),
-      availableCampaigns: rows.slice(0, 20)
+      availableCampaigns: result.rows.slice(0, 20),
+      autoSync: getGoogleAdsAutoSyncStatus()
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to activate Nissan live data feed.";
     const statusCode =
       message.toLowerCase().includes("missing") || message.toLowerCase().includes("not found") ? 400 : 500;
+    res.status(statusCode).json({ ok: false, error: message });
+  }
+});
+
+app.post("/api/integrations/google-ads/nissan/sync-now", async (req, res) => {
+  try {
+    const result = await runGoogleAdsAutoSyncTick({
+      trigger: "manual",
+      customerId: req.body.customerId,
+      requestedCampaignId: req.body.googleCampaignId || req.body.campaignId || "",
+      campaignNameContains: req.body.campaignNameContains || "",
+      accountName: req.body.accountName || getNissanAccountName()
+    });
+
+    if (!result) {
+      res.status(409).json({ ok: false, error: "Google Ads sync is already running. Try again in a few seconds." });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      integration: "google_ads",
+      accountName: result.accountName,
+      customerId: result.customerId,
+      selectedGoogleCampaign: result.selected,
+      linkedCampaign: result.synced.campaign,
+      linkedMetrics: result.synced.metrics,
+      dashboard: calculateDashboard(),
+      availableCampaigns: result.rows.slice(0, 20),
+      autoSync: getGoogleAdsAutoSyncStatus()
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to run Nissan sync.";
+    const statusCode = message.toLowerCase().includes("missing") ? 400 : 500;
     res.status(statusCode).json({ ok: false, error: message });
   }
 });
@@ -1023,4 +1236,5 @@ app.use((_req, res) => {
 
 app.listen(port, () => {
   console.log(`trd-geofence-api listening on port ${port}`);
+  startGoogleAdsAutoSyncScheduler();
 });

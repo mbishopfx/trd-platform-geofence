@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, ArrowRightLeft, Crosshair, Link2, MousePointerClick, Radar, RefreshCcw } from "lucide-react";
+import { Activity, ArrowRightLeft, Crosshair, Link2, MousePointerClick, Radar, RefreshCcw, RotateCw } from "lucide-react";
 import { useTrueRankStore } from "../lib/store";
 
 function formatInteger(value: number): string {
@@ -21,15 +21,19 @@ export default function CommandCenter() {
   const loading = useTrueRankStore((s) => s.loading);
   const error = useTrueRankStore((s) => s.error);
   const lastSyncAt = useTrueRankStore((s) => s.lastSyncAt);
+  const googleAdsIntegrationStatus = useTrueRankStore((s) => s.googleAdsIntegrationStatus);
+  const googleAdsAutoSyncStatus = useTrueRankStore((s) => s.googleAdsAutoSyncStatus);
   const bootstrap = useTrueRankStore((s) => s.bootstrap);
   const refreshDashboard = useTrueRankStore((s) => s.refreshDashboard);
   const recordEvent = useTrueRankStore((s) => s.recordEvent);
   const simulateCampaign = useTrueRankStore((s) => s.simulateCampaign);
   const activateNissanLiveData = useTrueRankStore((s) => s.activateNissanLiveData);
+  const runNissanSyncNow = useTrueRankStore((s) => s.runNissanSyncNow);
   const setActiveCampaign = useTrueRankStore((s) => s.setActiveCampaign);
 
   const [isSendingEvent, setIsSendingEvent] = useState(false);
   const [isActivatingLive, setIsActivatingLive] = useState(false);
+  const [isRunningSyncNow, setIsRunningSyncNow] = useState(false);
   const [liveDataMessage, setLiveDataMessage] = useState("");
 
   const selectedCampaign = useMemo(
@@ -105,6 +109,23 @@ export default function CommandCenter() {
     }
   }
 
+  async function handleSyncNow(): Promise<void> {
+    setIsRunningSyncNow(true);
+    setLiveDataMessage("Running live sync now...");
+    try {
+      const campaign = await runNissanSyncNow("nissan");
+      setLiveDataMessage(`Live sync complete: ${campaign.name}`);
+    } catch (syncError) {
+      if (syncError instanceof Error) {
+        setLiveDataMessage(syncError.message);
+      } else {
+        setLiveDataMessage("Failed to run live sync.");
+      }
+    } finally {
+      setIsRunningSyncNow(false);
+    }
+  }
+
   return (
     <section className="space-y-6">
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -147,12 +168,39 @@ export default function CommandCenter() {
             </button>
             <button
               type="button"
+              onClick={handleSyncNow}
+              disabled={isRunningSyncNow}
+              className="inline-flex items-center gap-2 rounded-lg border border-tr-primary/30 bg-tr-primary/10 px-3 py-2 text-xs text-tr-primary disabled:opacity-60"
+            >
+              <RotateCw size={14} /> {isRunningSyncNow ? "Syncing..." : "Sync Now"}
+            </button>
+            <button
+              type="button"
               onClick={() => refreshDashboard()}
               className="inline-flex items-center gap-2 rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-xs text-zinc-200 hover:text-white"
             >
               <RefreshCcw size={14} /> Refresh
             </button>
           </div>
+        </div>
+
+        <div className="mb-4 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-xs text-zinc-300">
+          <span className="mr-3">
+            Google Ads: {googleAdsIntegrationStatus?.ready ? "Connected" : "Not Ready"}
+          </span>
+          <span className="mr-3">
+            Auto-sync:{" "}
+            {googleAdsAutoSyncStatus?.enabled ? `On (${googleAdsAutoSyncStatus.intervalSec}s)` : "Off"}
+          </span>
+          {googleAdsAutoSyncStatus?.lastSuccessfulSyncAt ? (
+            <span className="mr-3">Last success: {new Date(googleAdsAutoSyncStatus.lastSuccessfulSyncAt).toLocaleString()}</span>
+          ) : null}
+          {googleAdsAutoSyncStatus?.nextRunAt ? (
+            <span className="mr-3">Next run: {new Date(googleAdsAutoSyncStatus.nextRunAt).toLocaleTimeString()}</span>
+          ) : null}
+          {googleAdsAutoSyncStatus?.lastError ? (
+            <span className="text-red-300">Auto-sync error: {googleAdsAutoSyncStatus.lastError}</span>
+          ) : null}
         </div>
 
         <div className="grid gap-4 lg:grid-cols-[2fr,1fr]">
